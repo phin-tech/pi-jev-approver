@@ -21,52 +21,45 @@ uses to decide when to trust an automatic decision versus asking a human.
 
 ## How it works
 
-Every `bash` tool call gets sent to Jev with:
+Every `bash` tool call becomes one Jev request (`src/jev-client.ts`): a `state`
+object of facts, and a set of typed `questions` asked over that state.
 
-- the command itself
-- current git branch, and whether it looks protected (`main`, `master`,
-  `release/*`, `deploy/*`) - so `git push origin main` reads as riskier than
-  the same push to a feature branch, without a separate rule for it
-- the project's language ecosystem (detected from marker files: `package.json`,
-  `pyproject.toml`/`setup.py`, `Cargo.toml`, `go.mod`, `Gemfile`, `pom.xml`/
-  `build.gradle`) - installing dependencies runs arbitrary code during
-  install/build in most of these (npm postinstall, Python `setup.py`, Rust
-  `build.rs`), which Jev is told to weigh
-- whether the command looks like a public package registry publish (`npm
-  publish`, `twine upload`, `cargo publish`, `gem push`, `mvn deploy`, etc.)
-  - a published version is visible to everyone who depends on it and is
-    effectively permanent even if later deprecated, which "affects shared
-    state" alone undersells
-- whether any file-path-like argument resolves **outside the current
-  project directory** (a sibling directory, the home directory, or the
-  filesystem root) - this is what tells `rm -rf ../../other-project` apart
-  from `rm -rf ./build`, which look identical to the `destructive` flag
-  alone. Live-tested: the sibling-project case scored 1.99/2 at 0.99
-  confidence with `why: operates_outside_project_directory`, versus 0.61 at
-  low confidence for the scoped version of the same command.
+### State sent to Jev (facts, not questions)
 
-Branch-protection, publish-command detection, and path-scope are all
-deterministic lookups (regex/marker files/path resolution against `cwd`),
-not semantic judgments - they're handed to Jev as state for it to weigh,
-never asked as their own Noul question.
+Everything here is computed by plain code - a git command, a filesystem
+check, a regex, a lookup in the audit log - never itself a judgment call.
+Jev never has to *derive* any of it, only weigh it.
 
-Jev returns a risk score (0-2) with confidence, five independent flags
-(`destructive`, `hard_to_reverse`, `affects_shared_or_remote_state`,
-`downloads_and_executes_code`, `modifies_permissions_or_ownership`), and a
-`primary_concern` Choice - a typed "why" (Jev returns typed judgments, not
-generated explanations, so this is its own question rather than a free-text
-rationale) shown on the human prompt even when all five booleans read false
-but the score is still elevated (e.g. a protected-branch target).
+| Field | Source | Always sent? |
+| --- | --- | --- |
+| `shell_command` | the raw command string | always |
+| `command_executable`, `command_subcommand`, `command_args` | `command-parts.ts`'s best-effort tokenizer | always |
+| `command_file_path_like_args` | args that look like paths (contain `/`, or start with `~`/`.`) | always |
+| `git_branch`, `git_branch_is_protected` | current branch; matched against `main`/`master`/`prod(uction)?`/`release/*`/`deploy/*` | if `cwd` is a git repo |
+| `git_has_uncommitted_changes` | `git status --porcelain` non-empty | if determinable |
+| `project_ecosystem` | marker file in `cwd`: `package.json`→node, `pyproject.toml`/`setup.py`→python, `Cargo.toml`→rust, `go.mod`→go, `Gemfile`→ruby, `pom.xml`/`build.gradle`→java | if a marker file is found |
+| `looks_like_public_registry_publish` | regex match against `npm/yarn/pnpm publish`, `twine upload`, `cargo publish`, `gem push`, `mvn deploy` | always |
+| `command_paths_outside_project_directory` | which file-path-like args resolve outside `cwd` (`path-scope.ts`) | if there are any path-like args |
+| `command_targets_home_directory`, `command_targets_filesystem_root` | whether any path resolves to `$HOME` or `/` | if there are any path-like args |
+| `prior_human_decisions_for_this_exact_command` | exact-string match against the audit log: times reviewed/allowed/denied, last stated reason | only if `PI_JEV_APPROVER_FEED_HISTORY=1` **and** this exact command has been seen before |
 
-When a human is asked, the prompt also shows this exact command's decision
-history (times seen, allowed/denied, last stated reason) if there is any -
-informational only. That history is **not** fed into Jev's automated risk
-score by default, since doing so risks a rubber-stamp loop: one approval
-(careless or not) would quietly lower scrutiny for every future identical
-command with no second check. Opt in with `PI_JEV_APPROVER_FEED_HISTORY=1`
-if you've weighed that tradeoff; the safer default leaves learning from
-aggregate history to the logistic regression below, which is accountable to
-real statistics rather than a single ad hoc count.
+### Questions asked over that state
+
+| Question | Type | Purpose |
+| --- | --- | --- |
+| `risk_level` | Score (0-2, see `RISK_LEVELS`) | the headline number the auto-allow/auto-deny/ask thresholds gate on |
+| `destructive` | Noul | deletes/overwrites/irreversibly discards local data |
+| `hard_to_reverse` | Noul | hard/impossible to undo even if not "destructive" (e.g. force-push) |
+| `affects_shared_or_remote_state` | Noul | visible to other people/systems, not just this machine |
+| `downloads_and_executes_code` | Noul | fetches and runs code from the network |
+| `modifies_permissions_or_ownership` | Noul | changes file/system access control |
+| *(your `customConcerns`, if configured)* | Noul, one per entry | domain-specific flags you added - see below |
+| `primary_concern` | Choice, over all of the above + `protected_branch_target`, `large_or_multi_step_command`, `operates_outside_project_directory`, `general_caution_no_single_driver` | the typed "why" shown on the human prompt |
+
+`risk_level`'s own instructions explicitly tell Jev to weigh branch
+protection, ecosystem/install-time code execution, public-registry
+publishes, prior human decisions, and out-of-project paths - so the state
+above isn't just passively available, it's specifically called out.
 
 ```
 confident + risk <= 0.5   -> auto-allow
@@ -74,7 +67,12 @@ confident + risk >= 1.5   -> auto-deny
 dicey (or Jev itself is unsure) -> optionally escalate to a stronger LLM, else ask a human
 ```
 
-Every decision is appended to a local, redacted JSONL audit log.
+Every decision is appended to a local, redacted JSONL audit log, and the
+history line (times seen, allowed/denied, last reason) is always shown to a
+human when asked, whether or not `PI_JEV_APPROVER_FEED_HISTORY` is set -
+only feeding it back into Jev's automated score is gated, to avoid a
+rubber-stamp loop where one approval quietly lowers scrutiny for every
+future identical command with no second check.
 
 ## Custom concerns
 
