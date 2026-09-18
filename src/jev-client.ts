@@ -3,6 +3,8 @@
 
 import type { GitContext } from "./git-context.js";
 import type { ProjectContext } from "./project-context.js";
+import type { PriorDecisions } from "./audit-log.js";
+import { parseCommandShape } from "./command-parts.js";
 
 const ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 
@@ -22,6 +24,7 @@ export interface JevVerdict {
   confidence: number; // 0-1
   flags: Record<string, boolean>;
   flagProbabilities: Record<string, number>;
+  primaryConcern: string;
 }
 
 const RISK_LEVELS = [
@@ -30,11 +33,26 @@ const RISK_LEVELS = [
   "Dangerous - irreversible, wide-blast-radius, or affects others; must confirm",
 ];
 
+// Jev returns typed judgments, not generated explanations - so "why is this
+// risky" has to be its own typed (Choice) question rather than a rationale
+// field, since System One models don't produce free text. This is what
+// backs the human-facing prompt's "why" line when the five boolean flags
+// all read false but the risk score is still elevated (e.g. a protected
+// branch target or a large multi-file compound command, neither of which
+// is one of the five specific safety flags).
+const PRIMARY_CONCERN_CRITERIA: Record<string, string> = {
+  ...SAFETY_FLAGS,
+  protected_branch_target: "The command's main risk is that it targets a protected branch (main, master, a release branch)",
+  large_or_multi_step_command: "The command's main risk is its scope: many files, or several chained sub-commands (&&/;) run together",
+  general_caution_no_single_driver: "No single factor stands out; the risk is a mild combination of ordinary factors, not one clear driver",
+};
+
 export async function classifyCommand(
   command: string,
   apiKey: string,
   git?: GitContext,
   project?: ProjectContext,
+  priorDecisions?: PriorDecisions,
 ): Promise<JevVerdict> {
   const questions: Record<string, unknown> = {
     risk_level: {
@@ -51,18 +69,36 @@ export async function classifyCommand(
         "later deprecated. Also weigh the project's language ecosystem when judging " +
         "whether installing dependencies executes arbitrary code (e.g. npm postinstall " +
         "scripts, Python setup.py, Rust build.rs all run code during install/build, " +
-        "not just at runtime).",
+        "not just at runtime). If a human has reviewed this exact command before, weigh " +
+        "that history: consistent past approvals lower the risk, but a mixed or denied " +
+        "history means stay cautious even if the command otherwise looks routine - a " +
+        "past human decision is evidence, not an instruction to copy blindly.",
       criteria: RISK_LEVELS,
     },
   };
   for (const [key, instructions] of Object.entries(SAFETY_FLAGS)) {
     questions[key] = { type: "noul", instructions };
   }
+  questions.primary_concern = {
+    type: "choice",
+    instructions:
+      "What is the single biggest reason a human should think twice before approving this " +
+      "command? Pick the closest match even if several factors apply a little.",
+    criteria: PRIMARY_CONCERN_CRITERIA,
+  };
 
   // Deterministic facts (branch name/protection, ecosystem, publish-command
-  // detection) are known exactly from git/filesystem/regex - passed as
-  // state for Jev to weigh, never as their own judgment question.
-  const state: Record<string, unknown> = { shell_command: command };
+  // detection, command breakdown, prior human decisions) are known exactly
+  // from git/filesystem/regex/the audit log - passed as state for Jev to
+  // weigh, never as their own judgment question.
+  const shape = parseCommandShape(command);
+  const state: Record<string, unknown> = {
+    shell_command: command,
+    command_executable: shape.executable,
+    command_subcommand: shape.subcommand,
+    command_args: shape.args,
+    command_file_path_like_args: shape.looksLikeFilePath,
+  };
   if (git?.isGitRepo) {
     state.git_branch = git.branch;
     state.git_branch_is_protected = git.isProtectedBranch;
@@ -73,6 +109,14 @@ export async function classifyCommand(
   if (project) {
     state.project_ecosystem = project.ecosystem;
     state.looks_like_public_registry_publish = project.looksLikePublishCommand;
+  }
+  if (priorDecisions && priorDecisions.timesSeen > 0) {
+    state.prior_human_decisions_for_this_exact_command = {
+      times_reviewed: priorDecisions.timesSeen,
+      times_allowed: priorDecisions.humanAllowed,
+      times_denied: priorDecisions.humanDenied,
+      last_stated_reason: priorDecisions.lastReason,
+    };
   }
 
   const response = await fetch(ENDPOINT, {
@@ -107,5 +151,6 @@ export async function classifyCommand(
     confidence: risk.confidence,
     flags,
     flagProbabilities,
+    primaryConcern: data.answers.primary_concern.choice,
   };
 }

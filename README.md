@@ -42,9 +42,23 @@ Branch-protection and publish-command detection are both deterministic
 lookups (regex/marker files), not semantic judgments - they're handed to
 Jev as state for it to weigh, not asked as their own Noul question.
 
-Jev returns a risk score (0-2) with confidence, plus five independent flags
+Jev returns a risk score (0-2) with confidence, five independent flags
 (`destructive`, `hard_to_reverse`, `affects_shared_or_remote_state`,
-`downloads_and_executes_code`, `modifies_permissions_or_ownership`).
+`downloads_and_executes_code`, `modifies_permissions_or_ownership`), and a
+`primary_concern` Choice - a typed "why" (Jev returns typed judgments, not
+generated explanations, so this is its own question rather than a free-text
+rationale) shown on the human prompt even when all five booleans read false
+but the score is still elevated (e.g. a protected-branch target).
+
+When a human is asked, the prompt also shows this exact command's decision
+history (times seen, allowed/denied, last stated reason) if there is any -
+informational only. That history is **not** fed into Jev's automated risk
+score by default, since doing so risks a rubber-stamp loop: one approval
+(careless or not) would quietly lower scrutiny for every future identical
+command with no second check. Opt in with `PI_JEV_APPROVER_FEED_HISTORY=1`
+if you've weighed that tradeoff; the safer default leaves learning from
+aggregate history to the logistic regression below, which is accountable to
+real statistics rather than a single ad hoc count.
 
 ```
 confident + risk <= 0.5   -> auto-allow

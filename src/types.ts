@@ -14,6 +14,7 @@ export interface ExtensionContextLike {
   hasUI?: boolean;
   ui?: {
     select?: (title: string, options: string[]) => Promise<string | undefined>;
+    input?: (title: string, placeholder?: string) => Promise<string | undefined>;
     notify?: (message: string, type?: "info" | "warning" | "error") => void;
     setStatus?: (key: string, value: string | undefined) => void;
   };
