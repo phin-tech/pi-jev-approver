@@ -5,6 +5,7 @@ import type { GitContext } from "./git-context.js";
 import type { ProjectContext } from "./project-context.js";
 import type { PriorDecisions } from "./audit-log.js";
 import { parseCommandShape } from "./command-parts.js";
+import { classifyPaths } from "./path-scope.js";
 
 const ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 
@@ -39,6 +40,7 @@ const RISK_LEVELS = [
 const FIXED_CONCERN_EXTRAS: Record<string, string> = {
   protected_branch_target: "The command's main risk is that it targets a protected branch (main, master, a release branch)",
   large_or_multi_step_command: "The command's main risk is its scope: many files, or several chained sub-commands (&&/;) run together",
+  operates_outside_project_directory: "The command's main risk is that it reaches outside the current project directory (a parent directory, the home directory, or the filesystem root)",
   general_caution_no_single_driver: "No single factor stands out; the risk is a mild combination of ordinary factors, not one clear driver",
 };
 
@@ -49,6 +51,7 @@ export async function classifyCommand(
   project?: ProjectContext,
   priorDecisions?: PriorDecisions,
   customConcerns: Record<string, string> = {},
+  cwd?: string,
 ): Promise<JevVerdict> {
   // User-configured concerns (e.g. "aws_command") become real Noul flags,
   // not just labels - independently detectable, and they flow into both
@@ -82,7 +85,12 @@ export async function classifyCommand(
         "not just at runtime). If a human has reviewed this exact command before, weigh " +
         "that history: consistent past approvals lower the risk, but a mixed or denied " +
         "history means stay cautious even if the command otherwise looks routine - a " +
-        "past human decision is evidence, not an instruction to copy blindly.",
+        "past human decision is evidence, not an instruction to copy blindly. If any " +
+        "argument resolves to a path outside the current project directory, treat that " +
+        "as a real risk factor, especially combined with a destructive or permission-" +
+        "changing action - the same command scoped to the project directory is far safer " +
+        "than one reaching into a sibling project, the home directory, or the filesystem " +
+        "root.",
       criteria: RISK_LEVELS,
     },
   };
@@ -127,6 +135,12 @@ export async function classifyCommand(
       times_denied: priorDecisions.humanDenied,
       last_stated_reason: priorDecisions.lastReason,
     };
+  }
+  if (cwd && shape.looksLikeFilePath.length > 0) {
+    const scoped = classifyPaths(shape.looksLikeFilePath, cwd);
+    state.command_paths_outside_project_directory = scoped.filter((p) => !p.withinCwd).map((p) => p.path);
+    state.command_targets_home_directory = scoped.some((p) => p.isHomeDirectory);
+    state.command_targets_filesystem_root = scoped.some((p) => p.isFilesystemRoot);
   }
 
   const response = await fetch(ENDPOINT, {

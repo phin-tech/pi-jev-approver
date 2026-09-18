@@ -37,10 +37,18 @@ Every `bash` tool call gets sent to Jev with:
   - a published version is visible to everyone who depends on it and is
     effectively permanent even if later deprecated, which "affects shared
     state" alone undersells
+- whether any file-path-like argument resolves **outside the current
+  project directory** (a sibling directory, the home directory, or the
+  filesystem root) - this is what tells `rm -rf ../../other-project` apart
+  from `rm -rf ./build`, which look identical to the `destructive` flag
+  alone. Live-tested: the sibling-project case scored 1.99/2 at 0.99
+  confidence with `why: operates_outside_project_directory`, versus 0.61 at
+  low confidence for the scoped version of the same command.
 
-Branch-protection and publish-command detection are both deterministic
-lookups (regex/marker files), not semantic judgments - they're handed to
-Jev as state for it to weigh, not asked as their own Noul question.
+Branch-protection, publish-command detection, and path-scope are all
+deterministic lookups (regex/marker files/path resolution against `cwd`),
+not semantic judgments - they're handed to Jev as state for it to weigh,
+never asked as their own Noul question.
 
 Jev returns a risk score (0-2) with confidence, five independent flags
 (`destructive`, `hard_to_reverse`, `affects_shared_or_remote_state`,

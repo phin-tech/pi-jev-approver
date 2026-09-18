@@ -6,6 +6,8 @@ import { getGitContext, type GitContext } from "./git-context.js";
 import { getProjectContext, type ProjectContext } from "./project-context.js";
 import { loadConfig } from "./config.js";
 import { escalateToLLM } from "./llm-escalation.js";
+import { parseCommandShape } from "./command-parts.js";
+import { classifyPaths } from "./path-scope.js";
 
 // Auto-allow below this risk score, given high confidence.
 const AUTO_ALLOW_MAX_RISK = 0.5;
@@ -51,6 +53,7 @@ async function askHuman(
   git: GitContext,
   project: ProjectContext,
   priorDecisions: PriorDecisions,
+  outsideCwdPaths: string[],
 ): Promise<HumanDecision> {
   if (!ctx.hasUI || !ctx.ui?.select) {
     return { approved: false }; // fail closed - no UI to ask through
@@ -61,6 +64,8 @@ async function askHuman(
   const publishLine = project.looksLikePublishCommand
     ? `  looks like a ${project.ecosystem} package publish command\n`
     : "";
+  const outsideCwdLine =
+    outsideCwdPaths.length > 0 ? `  reaches outside project directory: ${outsideCwdPaths.join(", ")}\n` : "";
   // Shown to the human regardless of FEED_PRIOR_DECISIONS_INTO_RISK_SCORE -
   // informing a human's own judgment carries none of the automated
   // rubber-stamp risk that feeding it into Jev's score would.
@@ -76,6 +81,7 @@ async function askHuman(
     `  command: ${command}\n` +
     branchLine +
     publishLine +
+    outsideCwdLine +
     historyLine +
     `  risk=${jev.riskScore.toFixed(2)}/2  confidence=${jev.confidence.toFixed(2)}\n` +
     `  flags: ${flagSummary(jev)}\n` +
@@ -115,6 +121,10 @@ export async function evaluateToolCall(
     loadConfig(),
   ]);
 
+  const outsideCwdPaths = classifyPaths(parseCommandShape(command).looksLikeFilePath, cwd)
+    .filter((p) => !p.withinCwd)
+    .map((p) => p.path);
+
   let jev: JevVerdict;
   try {
     jev = await classifyCommand(
@@ -124,6 +134,7 @@ export async function evaluateToolCall(
       project,
       FEED_PRIOR_DECISIONS_INTO_RISK_SCORE ? priorDecisions : undefined,
       config.customConcerns,
+      cwd,
     );
   } catch (error) {
     ctx.ui?.notify?.(`pi-jev-approver: classification failed (${String(error)}), failing closed.`, "warning");
@@ -206,7 +217,15 @@ export async function evaluateToolCall(
   // Ask a human, and log their answer against Jev's features - this pairing
   // is the training signal for a future classical model on top of these
   // features.
-  const { approved, reason: humanReason } = await askHuman(ctx, command, jev, git, project, priorDecisions);
+  const { approved, reason: humanReason } = await askHuman(
+    ctx,
+    command,
+    jev,
+    git,
+    project,
+    priorDecisions,
+    outsideCwdPaths,
+  );
   await writeAuditRow({
     timestamp: new Date().toISOString(),
     command: logged,
