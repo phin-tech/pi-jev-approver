@@ -5,6 +5,7 @@ import { redactCommand } from "./redact.js";
 import { getGitContext, type GitContext } from "./git-context.js";
 import { getProjectContext, type ProjectContext } from "./project-context.js";
 import { loadConfig } from "./config.js";
+import { matchCommand } from "./command-rules.js";
 import { escalateToLLM } from "./llm-escalation.js";
 import { parseCommandShape } from "./command-parts.js";
 import { classifyPaths } from "./path-scope.js";
@@ -114,11 +115,38 @@ export async function evaluateToolCall(
   }
 
   const cwd = ctx.cwd || process.cwd();
-  const [git, project, priorDecisions, config] = await Promise.all([
+
+  // Checked first, before any context is computed or Jev is called - a
+  // config rule is a hard override in either direction, not a suggestion.
+  // "deny" means genuinely verboten: no Jev call, no LLM escalation, no
+  // human prompt can overturn it, since the whole point is a guarantee
+  // stronger than any probabilistic judgment. "allow" skips the Jev call
+  // for commands the user has already decided are always fine.
+  const config = await loadConfig();
+  const matchedRule = matchCommand(command, config.commandRules);
+  if (matchedRule) {
+    const approved = matchedRule.action === "allow";
+    await writeAuditRow({
+      timestamp: new Date().toISOString(),
+      command: redactCommand(command),
+      route: approved ? "rule_allow" : "rule_deny",
+      matchedRule: { pattern: matchedRule.pattern, weight: matchedRule.weight, reason: matchedRule.reason },
+    });
+    return approved
+      ? {}
+      : {
+          block: true,
+          reason:
+            `pi-jev-approver: HARD BLOCK by config rule "${matchedRule.pattern}"` +
+            `${matchedRule.reason ? ` (${matchedRule.reason})` : ""}. This command is configured as ` +
+            `never-allowed - not a judgment call, and not something the user can override by being asked again.`,
+        };
+  }
+
+  const [git, project, priorDecisions] = await Promise.all([
     getGitContext(cwd),
     getProjectContext(cwd, command),
     getPriorDecisions(redactCommand(command)),
-    loadConfig(),
   ]);
 
   const outsideCwdPaths = classifyPaths(parseCommandShape(command).looksLikeFilePath, cwd)

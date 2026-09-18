@@ -38,6 +38,15 @@ export default function piJevApproverExtension(pi: ExtensionAPI): void {
             entries.length === 0
               ? "no custom concerns configured (see config.example.json in the package for the format)"
               : "custom concerns:\n" + entries.map(([k, v]) => `  ${k}: ${v}`).join("\n"),
+            config.commandRules.length === 0
+              ? "no command rules configured"
+              : "command rules:\n" +
+                config.commandRules
+                  .map(
+                    (r) =>
+                      `  [${r.action === "deny" ? "HARD BLOCK" : "allow"}, weight ${r.weight}] ${r.pattern}${r.reason ? ` - ${r.reason}` : ""}`,
+                  )
+                  .join("\n"),
             `llm escalation: ${esc.enabled ? "enabled" : "disabled"}` +
               (esc.enabled
                 ? ` (model: ${esc.model || "active session model"}, ` +

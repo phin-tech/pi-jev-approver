@@ -7,6 +7,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { compileRules, type CommandRule, type MatchedRule } from "./command-rules.js";
 
 // Escalates to a real chat LLM when Jev's verdict falls in the dicey band
 // by the user's own thresholds, via Pi's own model registry (ctx.model /
@@ -31,6 +32,10 @@ export interface EscalationConfig {
 export interface ExtensionConfig {
   customConcerns: Record<string, string>;
   escalation: EscalationConfig;
+  // Compiled and ready to test - see command-rules.ts. Checked before
+  // anything else in decision.ts: a match short-circuits the whole Jev/
+  // human/escalation pipeline, in either direction.
+  commandRules: MatchedRule[];
 }
 
 const DEFAULT_ESCALATION: EscalationConfig = {
@@ -41,7 +46,7 @@ const DEFAULT_ESCALATION: EscalationConfig = {
   timeoutSeconds: 20,
 };
 
-const EMPTY_CONFIG: ExtensionConfig = { customConcerns: {}, escalation: DEFAULT_ESCALATION };
+const EMPTY_CONFIG: ExtensionConfig = { customConcerns: {}, escalation: DEFAULT_ESCALATION, commandRules: [] };
 
 // Keys become JSON field names sent to the API and object keys throughout
 // the codebase - keep them predictable. Max count bounds token cost, since
@@ -49,6 +54,25 @@ const EMPTY_CONFIG: ExtensionConfig = { customConcerns: {}, escalation: DEFAULT_
 const KEY_PATTERN = /^[a-z][a-z0-9_]{1,40}$/;
 const MAX_CUSTOM_CONCERNS = 10;
 const MAX_DESCRIPTION_LENGTH = 300;
+
+function parseCommandRules(raw: unknown): CommandRule[] {
+  if (!Array.isArray(raw)) return [];
+  const rules: CommandRule[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const r = entry as Record<string, unknown>;
+    if (typeof r.pattern !== "string" || r.pattern.length === 0) continue;
+    if (r.action !== "allow" && r.action !== "deny") continue;
+    rules.push({
+      pattern: r.pattern,
+      flags: typeof r.flags === "string" ? r.flags : undefined,
+      action: r.action,
+      weight: typeof r.weight === "number" ? r.weight : 0,
+      reason: typeof r.reason === "string" ? r.reason.slice(0, 300) : undefined,
+    });
+  }
+  return rules;
+}
 
 function parseEscalation(raw: unknown): EscalationConfig {
   if (typeof raw !== "object" || raw === null) return DEFAULT_ESCALATION;
@@ -109,5 +133,9 @@ export async function loadConfig(path: string = configPath()): Promise<Extension
     }
   }
 
-  return { customConcerns, escalation: parseEscalation(obj.escalation) };
+  return {
+    customConcerns,
+    escalation: parseEscalation(obj.escalation),
+    commandRules: compileRules(parseCommandRules(obj.commandRules)),
+  };
 }

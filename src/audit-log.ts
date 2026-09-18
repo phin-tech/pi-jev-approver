@@ -22,13 +22,25 @@ export function exportsDir(): string {
 export interface AuditRow {
   timestamp: string;
   command: string;
-  jev: JevVerdict;
-  git: GitContext;
-  project: ProjectContext;
-  route: "auto_allow" | "auto_deny" | "human_allow" | "human_deny" | "llm_allow" | "llm_deny" | "failed_closed";
+  // Absent for rule_allow/rule_deny - those never call Jev or compute
+  // context at all, that's the entire point of a hard config rule.
+  jev?: JevVerdict;
+  git?: GitContext;
+  project?: ProjectContext;
+  route:
+    | "rule_allow"
+    | "rule_deny"
+    | "auto_allow"
+    | "auto_deny"
+    | "human_allow"
+    | "human_deny"
+    | "llm_allow"
+    | "llm_deny"
+    | "failed_closed";
   humanApproved?: boolean;
   humanReason?: string;
   llmEscalation?: EscalationVerdict;
+  matchedRule?: { pattern: string; weight: number; reason?: string };
 }
 
 export interface PriorDecisions {

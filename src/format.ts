@@ -1,6 +1,8 @@
 import type { AuditRow } from "./audit-log.js";
 
 const ROUTE_LABEL: Record<AuditRow["route"], string> = {
+  rule_allow: "rule pre-approved",
+  rule_deny: "HARD BLOCK",
   auto_allow: "auto-allow",
   auto_deny: "auto-deny",
   human_allow: "human allowed",
@@ -17,17 +19,27 @@ function truncate(text: string, max: number): string {
 
 export function formatAuditRow(row: AuditRow): string {
   const time = row.timestamp.slice(11, 19); // HH:MM:SS
-  const risk = row.jev.riskScore.toFixed(2);
-  const conf = row.jev.confidence.toFixed(2);
-  const flags = Object.entries(row.jev.flags)
-    .filter(([, v]) => v)
-    .map(([k]) => k)
-    .join(",");
-  const branch = row.git.isGitRepo
-    ? ` [${row.git.branch}${row.git.isProtectedBranch ? "*" : ""}]`
+
+  if (row.route === "rule_allow" || row.route === "rule_deny") {
+    const rule = row.matchedRule;
+    return (
+      `${time}  ${ROUTE_LABEL[row.route].padEnd(14)} ${truncate(row.command, 70)}` +
+      (rule ? `\n           matched rule: "${rule.pattern}" (weight ${rule.weight})${rule.reason ? ` - ${rule.reason}` : ""}` : "")
+    );
+  }
+
+  const jev = row.jev;
+  const risk = jev ? jev.riskScore.toFixed(2) : "?";
+  const conf = jev ? jev.confidence.toFixed(2) : "?";
+  const flags = jev
+    ? Object.entries(jev.flags)
+        .filter(([, v]) => v)
+        .map(([k]) => k)
+        .join(",")
     : "";
+  const branch = row.git?.isGitRepo ? ` [${row.git.branch}${row.git.isProtectedBranch ? "*" : ""}]` : "";
   // Older log rows predate the primaryConcern field - guard for undefined.
-  const why = row.jev.primaryConcern ? row.jev.primaryConcern.replace(/_/g, " ") : undefined;
+  const why = jev?.primaryConcern ? jev.primaryConcern.replace(/_/g, " ") : undefined;
   const llmLine = row.llmEscalation
     ? `\n           llm (${row.llmEscalation.modelUsed ?? "?"}): ${truncate(row.llmEscalation.rationale, 80)}`
     : "";

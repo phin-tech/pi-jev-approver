@@ -11,5 +11,26 @@
     "maxConfidenceToEscalate": 0.7,
     "timeoutSeconds": 20,
     "_comment": "model: provider/id resolved through Pi's own model registry (e.g. 'anthropic/claude-sonnet-5'), or '' to use whatever model your Pi session is already using. Auth comes from Pi's own model config - nothing extra to set up here. Escalates only when Jev's risk score AND confidence are both at or below the two thresholds; anything the LLM itself can't resolve to a clear allow/deny still falls through to asking you."
-  }
+  },
+  "commandRulesComment": "pattern: a regex tested against the raw command, case-insensitive by default (set \"flags\": \"\" per rule for case-sensitive). action: allow/deny are hard overrides - Jev is never called, no human/LLM can override a deny. weight: on multiple matches, highest wins; on a tie, deny wins over allow. Cap of 50 rules.",
+  "commandRules": [
+    {
+      "pattern": "^aws\\s+\\S+\\s+(describe|list|get|head|lookup|ls)[a-z0-9-]*\\b",
+      "action": "allow",
+      "weight": 20,
+      "reason": "AWS CLI read-only operation - skips Jev entirely. Writes are NOT denied here; they simply don't match this rule and fall through to the normal Jev pipeline, which already treats aws_command as risky."
+    },
+    {
+      "pattern": "drop\\s+(table|database)",
+      "action": "deny",
+      "weight": 100,
+      "reason": "never run raw SQL drops, no matter what any judgment call says"
+    },
+    {
+      "pattern": "^rm\\s+-rf\\s+/(\\s|$)",
+      "action": "deny",
+      "weight": 100,
+      "reason": "never rm -rf the filesystem root"
+    }
+  ]
 }

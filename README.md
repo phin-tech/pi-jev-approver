@@ -94,6 +94,56 @@ lowercase snake_case; capped at 10 (each one adds a question to every
 classification call, so more isn't free) and 300 characters of description.
 Check what's currently configured with `/jev-approver config`.
 
+## Hard-blocked and pre-approved commands (regex rules)
+
+Some commands shouldn't need a judgment call at all - either they're always
+fine, or they're genuinely **verboten**, full stop. `commandRules` in
+`config.json` short-circuits the entire pipeline (Jev, escalation, human
+prompt - none of it runs) for a matching command:
+
+```json
+{
+  "commandRules": [
+    {
+      "pattern": "^aws\\s+\\S+\\s+(describe|list|get|head|lookup|ls)[a-z0-9-]*\\b",
+      "action": "allow",
+      "weight": 20,
+      "reason": "AWS CLI read-only operation"
+    },
+    {
+      "pattern": "drop\\s+(table|database)",
+      "action": "deny",
+      "weight": 100,
+      "reason": "never run raw SQL drops"
+    }
+  ]
+}
+```
+
+- **`pattern`** - a regex tested against the raw command, case-insensitive
+  by default (pass `"flags": ""` on a rule for case-sensitive).
+- **`action`** - `"allow"` skips Jev entirely (cheaper and faster, not just
+  more lenient); `"deny"` is a genuine hard block - shown as `HARD BLOCK` in
+  the denial reason and in `/jev-approver recent` - that no escalated LLM
+  or human prompt can overturn, because the entire point is a guarantee
+  stronger than any probabilistic judgment.
+- **`weight`** - when multiple rules match, highest weight wins; on an
+  exact tie, `deny` wins over `allow` (a config mistake must fail toward
+  caution). Capped at 50 rules.
+
+Notice there's no rule denying AWS *writes* above - allow AWS reads (`aws
+s3 ls`, `aws ec2 describe-instances`, `aws sts get-caller-identity`, ...)
+and simply don't write a matching rule for writes at all; anything that
+doesn't match `action: allow` falls straight through to the normal Jev
+pipeline unchanged, which already treats `aws_command` (if you've added
+that custom concern) as risky. Live-tested: `aws s3 rm` scored 1.72/2,
+`aws ec2 terminate-instances` scored 1.80/2, both correctly landing in the
+ask-a-human band, while the three read commands never called Jev at all.
+There's no need to enumerate every dangerous AWS write verb by hand - that
+would be both intractable (the CLI surface is enormous) and unnecessary,
+since the existing probabilistic pipeline already handles "everything
+else" reasonably.
+
 ## Optional: escalate to a stronger LLM before asking a human
 
 For dicey commands, you can have the extension ask a real chat model for a
@@ -191,3 +241,6 @@ risk tolerance without touching Jev's weights at all.
   being resolvable (they ship with Pi itself) and on `ctx.modelRegistry`
   being present on the host - if either is missing, escalation reports
   "unsure" and falls through to asking you, it doesn't error out.
+- A `deny` command rule is a genuine hard block with no override path in
+  this extension - if you write an overly broad pattern, the only fix is
+  editing `config.json`, there's no runtime "allow just this once."
