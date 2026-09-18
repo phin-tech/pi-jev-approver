@@ -1,0 +1,15 @@
+{
+  "customConcerns": {
+    "aws_command": "This command interacts with AWS infrastructure (aws cli, cdk, terraform against AWS, eksctl, etc.) and could affect live cloud resources or incur cost",
+    "touches_prod_kubernetes": "This command targets a Kubernetes context or namespace that looks like production (prod, live, prd)",
+    "touches_billing_or_payments": "This command touches billing, payment, or invoicing systems or data"
+  },
+  "escalation": {
+    "enabled": false,
+    "model": "",
+    "maxRiskScoreToEscalate": 1.5,
+    "maxConfidenceToEscalate": 0.7,
+    "timeoutSeconds": 20,
+    "_comment": "model: provider/id resolved through Pi's own model registry (e.g. 'anthropic/claude-sonnet-5'), or '' to use whatever model your Pi session is already using. Auth comes from Pi's own model config - nothing extra to set up here. Escalates only when Jev's risk score AND confidence are both at or below the two thresholds; anything the LLM itself can't resolve to a clear allow/deny still falls through to asking you."
+  }
+}

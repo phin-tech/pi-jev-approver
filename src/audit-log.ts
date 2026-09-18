@@ -9,6 +9,7 @@ import { homedir } from "node:os";
 import type { JevVerdict } from "./jev-client.js";
 import type { GitContext } from "./git-context.js";
 import type { ProjectContext } from "./project-context.js";
+import type { EscalationVerdict } from "./llm-escalation.js";
 
 export function logPath(): string {
   return join(homedir(), ".pi", "pi-jev-approver", "audit.jsonl");
@@ -24,9 +25,10 @@ export interface AuditRow {
   jev: JevVerdict;
   git: GitContext;
   project: ProjectContext;
-  route: "auto_allow" | "auto_deny" | "human_allow" | "human_deny" | "failed_closed";
+  route: "auto_allow" | "auto_deny" | "human_allow" | "human_deny" | "llm_allow" | "llm_deny" | "failed_closed";
   humanApproved?: boolean;
   humanReason?: string;
+  llmEscalation?: EscalationVerdict;
 }
 
 export interface PriorDecisions {

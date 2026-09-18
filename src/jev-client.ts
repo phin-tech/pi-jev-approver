@@ -33,15 +33,10 @@ const RISK_LEVELS = [
   "Dangerous - irreversible, wide-blast-radius, or affects others; must confirm",
 ];
 
-// Jev returns typed judgments, not generated explanations - so "why is this
-// risky" has to be its own typed (Choice) question rather than a rationale
-// field, since System One models don't produce free text. This is what
-// backs the human-facing prompt's "why" line when the five boolean flags
-// all read false but the risk score is still elevated (e.g. a protected
-// branch target or a large multi-file compound command, neither of which
-// is one of the five specific safety flags).
-const PRIMARY_CONCERN_CRITERIA: Record<string, string> = {
-  ...SAFETY_FLAGS,
+// Fixed "why" categories that aren't one of the boolean safety flags -
+// merged with SAFETY_FLAGS and any user-configured customConcerns (see
+// config.ts) to build the primary_concern Choice below.
+const FIXED_CONCERN_EXTRAS: Record<string, string> = {
   protected_branch_target: "The command's main risk is that it targets a protected branch (main, master, a release branch)",
   large_or_multi_step_command: "The command's main risk is its scope: many files, or several chained sub-commands (&&/;) run together",
   general_caution_no_single_driver: "No single factor stands out; the risk is a mild combination of ordinary factors, not one clear driver",
@@ -53,7 +48,22 @@ export async function classifyCommand(
   git?: GitContext,
   project?: ProjectContext,
   priorDecisions?: PriorDecisions,
+  customConcerns: Record<string, string> = {},
 ): Promise<JevVerdict> {
+  // User-configured concerns (e.g. "aws_command") become real Noul flags,
+  // not just labels - independently detectable, and they flow into both
+  // the primary_concern "why" choice and the returned flags/probabilities
+  // for the audit log without any special-casing below.
+  const allFlags: Record<string, string> = { ...SAFETY_FLAGS, ...customConcerns };
+
+  // Jev returns typed judgments, not generated explanations - so "why is
+  // this risky" has to be its own typed (Choice) question rather than a
+  // rationale field, since System One models don't produce free text. This
+  // is what backs the human-facing prompt's "why" line when every boolean
+  // flag reads false but the risk score is still elevated (e.g. a
+  // protected branch target or a large multi-file compound command).
+  const primaryConcernCriteria: Record<string, string> = { ...allFlags, ...FIXED_CONCERN_EXTRAS };
+
   const questions: Record<string, unknown> = {
     risk_level: {
       type: "score",
@@ -76,7 +86,7 @@ export async function classifyCommand(
       criteria: RISK_LEVELS,
     },
   };
-  for (const [key, instructions] of Object.entries(SAFETY_FLAGS)) {
+  for (const [key, instructions] of Object.entries(allFlags)) {
     questions[key] = { type: "noul", instructions };
   }
   questions.primary_concern = {
@@ -84,7 +94,7 @@ export async function classifyCommand(
     instructions:
       "What is the single biggest reason a human should think twice before approving this " +
       "command? Pick the closest match even if several factors apply a little.",
-    criteria: PRIMARY_CONCERN_CRITERIA,
+    criteria: primaryConcernCriteria,
   };
 
   // Deterministic facts (branch name/protection, ecosystem, publish-command
@@ -140,7 +150,7 @@ export async function classifyCommand(
   const risk = data.answers.risk_level;
   const flags: Record<string, boolean> = {};
   const flagProbabilities: Record<string, number> = {};
-  for (const key of Object.keys(SAFETY_FLAGS)) {
+  for (const key of Object.keys(allFlags)) {
     const p = data.answers[key].noul as number;
     flagProbabilities[key] = p;
     flags[key] = p >= 0.5;

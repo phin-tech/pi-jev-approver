@@ -4,6 +4,8 @@ import { writeAuditRow, getPriorDecisions, type PriorDecisions } from "./audit-l
 import { redactCommand } from "./redact.js";
 import { getGitContext, type GitContext } from "./git-context.js";
 import { getProjectContext, type ProjectContext } from "./project-context.js";
+import { loadConfig } from "./config.js";
+import { escalateToLLM } from "./llm-escalation.js";
 
 // Auto-allow below this risk score, given high confidence.
 const AUTO_ALLOW_MAX_RISK = 0.5;
@@ -106,10 +108,11 @@ export async function evaluateToolCall(
   }
 
   const cwd = ctx.cwd || process.cwd();
-  const [git, project, priorDecisions] = await Promise.all([
+  const [git, project, priorDecisions, config] = await Promise.all([
     getGitContext(cwd),
     getProjectContext(cwd, command),
     getPriorDecisions(redactCommand(command)),
+    loadConfig(),
   ]);
 
   let jev: JevVerdict;
@@ -120,6 +123,7 @@ export async function evaluateToolCall(
       git,
       project,
       FEED_PRIOR_DECISIONS_INTO_RISK_SCORE ? priorDecisions : undefined,
+      config.customConcerns,
     );
   } catch (error) {
     ctx.ui?.notify?.(`pi-jev-approver: classification failed (${String(error)}), failing closed.`, "warning");
@@ -165,9 +169,43 @@ export async function evaluateToolCall(
     };
   }
 
-  // Dicey: mid-range risk, or the model itself isn't confident. Ask a human,
-  // and log their answer against Jev's features - this pairing is the
-  // training signal for a future classical model on top of these features.
+  // Dicey: mid-range risk, or the model itself isn't confident. Optionally
+  // escalate to a stronger chat LLM before asking a human (see config.ts's
+  // escalation section) - the LLM can only resolve this on its own if it
+  // returns a clear allow/deny; "unsure" or any failure falls through to
+  // asking a human exactly as if escalation were off.
+  const shouldEscalate =
+    config.escalation.enabled &&
+    jev.riskScore <= config.escalation.maxRiskScoreToEscalate &&
+    jev.confidence <= config.escalation.maxConfidenceToEscalate;
+
+  if (shouldEscalate) {
+    const verdict = await escalateToLLM(ctx, command, jev, config.escalation, git, project);
+    if (verdict.decision !== "unsure") {
+      const approved = verdict.decision === "allow";
+      await writeAuditRow({
+        timestamp: new Date().toISOString(),
+        command: logged,
+        jev,
+        git,
+        project,
+        route: approved ? "llm_allow" : "llm_deny",
+        llmEscalation: verdict,
+      });
+      return approved
+        ? {}
+        : {
+            block: true,
+            reason: `pi-jev-approver: denied by escalation model (${verdict.modelUsed ?? "unknown model"}): ${verdict.rationale}`,
+          };
+    }
+    // "unsure" (including any escalation failure) - fall through to asking
+    // a human, same as if escalation were disabled for this call.
+  }
+
+  // Ask a human, and log their answer against Jev's features - this pairing
+  // is the training signal for a future classical model on top of these
+  // features.
   const { approved, reason: humanReason } = await askHuman(ctx, command, jev, git, project, priorDecisions);
   await writeAuditRow({
     timestamp: new Date().toISOString(),

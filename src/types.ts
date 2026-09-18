@@ -9,6 +9,14 @@ export interface ToolCallEventLike {
   arguments?: unknown;
 }
 
+export interface AuthResolution {
+  ok: boolean;
+  apiKey?: string;
+  headers?: Record<string, string>;
+  env?: Record<string, string>;
+  error?: string;
+}
+
 export interface ExtensionContextLike {
   cwd?: string;
   hasUI?: boolean;
@@ -17,6 +25,14 @@ export interface ExtensionContextLike {
     input?: (title: string, placeholder?: string) => Promise<string | undefined>;
     notify?: (message: string, type?: "info" | "warning" | "error") => void;
     setStatus?: (key: string, value: string | undefined) => void;
+  };
+  // The active session model, and the registry used to resolve/authenticate
+  // a different one - both used only by the optional LLM-escalation path
+  // (src/llm-escalation.ts), never required for the core Jev gate.
+  model?: unknown;
+  modelRegistry?: {
+    find?: (provider: string, id: string) => unknown;
+    getApiKeyAndHeaders?: (model: unknown) => Promise<AuthResolution>;
   };
 }
 

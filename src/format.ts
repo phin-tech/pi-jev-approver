@@ -5,6 +5,8 @@ const ROUTE_LABEL: Record<AuditRow["route"], string> = {
   auto_deny: "auto-deny",
   human_allow: "human allowed",
   human_deny: "human denied",
+  llm_allow: "llm allowed",
+  llm_deny: "llm denied",
   failed_closed: "failed closed",
 };
 
@@ -26,11 +28,15 @@ export function formatAuditRow(row: AuditRow): string {
     : "";
   // Older log rows predate the primaryConcern field - guard for undefined.
   const why = row.jev.primaryConcern ? row.jev.primaryConcern.replace(/_/g, " ") : undefined;
+  const llmLine = row.llmEscalation
+    ? `\n           llm (${row.llmEscalation.modelUsed ?? "?"}): ${truncate(row.llmEscalation.rationale, 80)}`
+    : "";
   return (
     `${time}  ${ROUTE_LABEL[row.route].padEnd(14)} risk=${risk} conf=${conf}` +
     `${branch}  ${truncate(row.command, 70)}` +
     (why ? `\n           why: ${why}` : "") +
-    (flags ? `\n           flags: ${flags}` : "")
+    (flags ? `\n           flags: ${flags}` : "") +
+    llmLine
   );
 }
 

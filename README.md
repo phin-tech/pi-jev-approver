@@ -63,10 +63,63 @@ real statistics rather than a single ad hoc count.
 ```
 confident + risk <= 0.5   -> auto-allow
 confident + risk >= 1.5   -> auto-deny
-otherwise (dicey, or Jev itself is unsure)  -> ask a human
+dicey (or Jev itself is unsure) -> optionally escalate to a stronger LLM, else ask a human
 ```
 
 Every decision is appended to a local, redacted JSONL audit log.
+
+## Custom concerns
+
+Add your own domain-specific flags without forking - each becomes a real,
+independently-detectable Noul question, not just a label. Put them in
+`~/.pi/pi-jev-approver/config.json` (see `config.example.json`):
+
+```json
+{
+  "customConcerns": {
+    "aws_command": "This command interacts with AWS infrastructure and could affect live cloud resources or incur cost"
+  }
+}
+```
+
+Custom concerns automatically flow into the `primary_concern` "why" choice
+and the returned flags, same as the five built-in ones. Keys must be
+lowercase snake_case; capped at 10 (each one adds a question to every
+classification call, so more isn't free) and 300 characters of description.
+Check what's currently configured with `/jev-approver config`.
+
+## Optional: escalate to a stronger LLM before asking a human
+
+For dicey commands, you can have the extension ask a real chat model for a
+second opinion before bothering you - off by default. Enable it in
+`config.json`:
+
+```json
+{
+  "escalation": {
+    "enabled": true,
+    "model": "",
+    "maxRiskScoreToEscalate": 1.5,
+    "maxConfidenceToEscalate": 0.7
+  }
+}
+```
+
+`model` is a `provider/id` reference resolved through **Pi's own model
+registry** (e.g. `"anthropic/claude-sonnet-5"`), or `""` to use whatever
+model your Pi session is already talking to. Auth is whatever you already
+have configured in Pi for that model - there's no separate API key to set
+up here, unlike Jev (which needs its own `TYPESAFE_API_KEY` since it's a
+different service entirely).
+
+Escalation only fires when Jev's own risk score *and* confidence are both at
+or below your thresholds. Unlike Jev, a real chat LLM can produce a written
+rationale, which gets stored in the audit log (`llmEscalation.rationale`)
+and shown in `/jev-approver recent`. If the LLM call fails, times out, or
+doesn't return a clear allow/deny, this **always** falls through to asking
+you - escalation can only reduce how often you're asked, it can never
+replace you as the last resort. The system prompt also explicitly tells the
+model that when it's unsure, denying (not allowing) is the safe default.
 
 ## Setup
 
@@ -128,3 +181,7 @@ risk tolerance without touching Jev's weights at all.
 - The `ask a human` path fails closed (denies) if Pi has no interactive UI
   available (e.g. non-interactive/CI runs) - there's no fallback approval
   channel implemented here.
+- LLM escalation depends on `@oh-my-pi/pi-ai` or `@earendil-works/pi-ai`
+  being resolvable (they ship with Pi itself) and on `ctx.modelRegistry`
+  being present on the host - if either is missing, escalation reports
+  "unsure" and falls through to asking you, it doesn't error out.

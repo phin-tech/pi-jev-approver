@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContextLike, ToolCallEventLike } from "./sr
 import { evaluateToolCall } from "./src/decision.js";
 import { exportAuditLog, logPath, readRecentRows } from "./src/audit-log.js";
 import { formatRecentDecisions } from "./src/format.js";
+import { configPath, loadConfig } from "./src/config.js";
 
 const STATUS_KEY = "pi-jev-approver";
 const DEFAULT_RECENT_LIMIT = 15;
@@ -10,7 +11,7 @@ export default function piJevApproverExtension(pi: ExtensionAPI): void {
   const apiKey = process.env.TYPESAFE_API_KEY;
 
   pi.registerCommand?.("jev-approver", {
-    description: "args: status | recent [n] | export - recent shows the last n decisions with scores",
+    description: "args: status | recent [n] | export | config - config shows your custom concern flags",
     handler: async (args, ctx: ExtensionContextLike) => {
       const parts = args.trim().split(/\s+/).filter(Boolean);
       const command = parts[0] || "status";
@@ -24,6 +25,26 @@ export default function piJevApproverExtension(pi: ExtensionAPI): void {
         } catch (error) {
           ctx.ui?.notify?.(`Export failed: ${String(error)}`, "error");
         }
+        return;
+      }
+
+      if (command === "config") {
+        const config = await loadConfig();
+        const entries = Object.entries(config.customConcerns);
+        const esc = config.escalation;
+        ctx.ui?.notify?.(
+          [
+            `config file: ${configPath()}`,
+            entries.length === 0
+              ? "no custom concerns configured (see config.example.json in the package for the format)"
+              : "custom concerns:\n" + entries.map(([k, v]) => `  ${k}: ${v}`).join("\n"),
+            `llm escalation: ${esc.enabled ? "enabled" : "disabled"}` +
+              (esc.enabled
+                ? ` (model: ${esc.model || "active session model"}, ` +
+                  `escalates when risk<=${esc.maxRiskScoreToEscalate} and confidence<=${esc.maxConfidenceToEscalate})`
+                : ""),
+          ].join("\n"),
+        );
         return;
       }
 
@@ -42,6 +63,7 @@ export default function piJevApproverExtension(pi: ExtensionAPI): void {
           `audit log: ${logPath()}`,
           `run "/jev-approver recent [n]" to see recent decisions and scores`,
           `run "/jev-approver export" to copy a shareable, redacted snapshot`,
+          `run "/jev-approver config" to see your custom concern flags`,
         ]
           .filter(Boolean)
           .join("\n"),
