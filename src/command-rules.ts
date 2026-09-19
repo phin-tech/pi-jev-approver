@@ -24,7 +24,7 @@ export interface MatchedRule extends CommandRule {
   regex: RegExp;
 }
 
-const MAX_RULES = 50;
+export const MAX_RULES = 50;
 
 // A rule needs a compiled RegExp per use; compile once here rather than on
 // every command. Invalid patterns are dropped (fail open on the individual

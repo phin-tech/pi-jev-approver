@@ -43,12 +43,17 @@ export function formatAuditRow(row: AuditRow): string {
   const llmLine = row.llmEscalation
     ? `\n           llm (${row.llmEscalation.modelUsed ?? "?"}): ${truncate(row.llmEscalation.rationale, 80)}`
     : "";
+  const alwaysAllowLine =
+    row.savedAlwaysAllowRule === true
+      ? `\n           saved as an "always allow" rule for this exact command`
+      : "";
   return (
     `${time}  ${ROUTE_LABEL[row.route].padEnd(14)} risk=${risk} conf=${conf}` +
     `${branch}  ${truncate(row.command, 70)}` +
     (why ? `\n           why: ${why}` : "") +
     (flags ? `\n           flags: ${flags}` : "") +
-    llmLine
+    llmLine +
+    alwaysAllowLine
   );
 }
 

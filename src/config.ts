@@ -4,10 +4,10 @@
 // independently detectable (not just a label) and flows automatically into
 // the primary_concern "why" choice and the audit log/training data.
 
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-import { compileRules, type CommandRule, type MatchedRule } from "./command-rules.js";
+import { compileRules, MAX_RULES, type CommandRule, type MatchedRule } from "./command-rules.js";
 
 // Escalates to a real chat LLM when Jev's verdict falls in the dicey band
 // by the user's own thresholds, via Pi's own model registry (ctx.model /
@@ -138,4 +138,44 @@ export async function loadConfig(path: string = configPath()): Promise<Extension
     escalation: parseEscalation(obj.escalation),
     commandRules: compileRules(parseCommandRules(obj.commandRules)),
   };
+}
+
+// Appends one rule to the on-disk config, used by the "Always allow" choice
+// on the human prompt (decision.ts) so a one-time approval can turn into a
+// standing rule without the user having to hand-edit config.json. Reads and
+// rewrites the raw JSON (not the parsed ExtensionConfig) so any fields this
+// extension doesn't know about are preserved untouched. Never touches
+// existing rules beyond appending - a config mistake elsewhere is not this
+// function's problem to fix.
+export async function saveCommandRule(
+  rule: CommandRule,
+  path: string = configPath(),
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  let raw: string | undefined;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch {
+    raw = undefined; // no config file yet - start from an empty object
+  }
+
+  let obj: Record<string, unknown> = {};
+  if (raw !== undefined) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (typeof parsed === "object" && parsed !== null) obj = parsed as Record<string, unknown>;
+    } catch {
+      return { ok: false, reason: `${path} is not valid JSON - fix it by hand before adding a rule this way.` };
+    }
+  }
+
+  const existingRules = Array.isArray(obj.commandRules) ? obj.commandRules : [];
+  if (existingRules.length >= MAX_RULES) {
+    return { ok: false, reason: `already at the ${MAX_RULES}-rule cap - remove one in config.json first.` };
+  }
+
+  obj.commandRules = [...existingRules, rule];
+
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, JSON.stringify(obj, null, 2) + "\n", "utf8");
+  return { ok: true };
 }

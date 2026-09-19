@@ -4,7 +4,7 @@ import { writeAuditRow, getPriorDecisions, type PriorDecisions } from "./audit-l
 import { redactCommand } from "./redact.js";
 import { getGitContext, type GitContext } from "./git-context.js";
 import { getProjectContext, type ProjectContext } from "./project-context.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, saveCommandRule } from "./config.js";
 import { matchCommand } from "./command-rules.js";
 import { escalateToLLM } from "./llm-escalation.js";
 import { parseCommandShape } from "./command-parts.js";
@@ -45,6 +45,16 @@ function flagSummary(jev: JevVerdict): string {
 interface HumanDecision {
   approved: boolean;
   reason?: string;
+  // "Always allow" was chosen: caller should persist a standing command
+  // rule for this exact command in addition to approving this one call.
+  alwaysAllow?: boolean;
+}
+
+// Regex-escapes a literal string so it can be used as an exact-match
+// pattern in a command rule - "Always allow" must only ever match the
+// identical command that was approved, never a lookalike.
+function escapeForExactMatch(command: string): string {
+  return command.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function askHuman(
@@ -87,8 +97,9 @@ async function askHuman(
     `  risk=${jev.riskScore.toFixed(2)}/2  confidence=${jev.confidence.toFixed(2)}\n` +
     `  flags: ${flagSummary(jev)}\n` +
     `  why: ${jev.primaryConcern.replace(/_/g, " ")}`;
-  const choice = await ctx.ui.select(message, ["Allow", "Deny"]);
-  const approved = choice === "Allow";
+  const choice = await ctx.ui.select(message, ["Allow", "Always allow", "Deny"]);
+  const alwaysAllow = choice === "Always allow";
+  const approved = alwaysAllow || choice === "Allow";
 
   // Optional - captures *why*, which a bare allow/deny throws away and which
   // is exactly the signal that makes the audit log worth training on later,
@@ -101,7 +112,7 @@ async function askHuman(
     reason = entered?.trim() || undefined;
   }
 
-  return { approved, reason };
+  return { approved, reason, alwaysAllow };
 }
 
 export async function evaluateToolCall(
@@ -245,7 +256,7 @@ export async function evaluateToolCall(
   // Ask a human, and log their answer against Jev's features - this pairing
   // is the training signal for a future classical model on top of these
   // features.
-  const { approved, reason: humanReason } = await askHuman(
+  const { approved, reason: humanReason, alwaysAllow } = await askHuman(
     ctx,
     command,
     jev,
@@ -254,6 +265,26 @@ export async function evaluateToolCall(
     priorDecisions,
     outsideCwdPaths,
   );
+
+  let savedAlwaysAllowRule = false;
+  if (alwaysAllow) {
+    const result = await saveCommandRule({
+      pattern: `^${escapeForExactMatch(command)}$`,
+      action: "allow",
+      weight: 5,
+      reason: humanReason || "user chose 'always allow' when asked",
+    });
+    savedAlwaysAllowRule = result.ok;
+    if (!result.ok) {
+      ctx.ui?.notify?.(
+        `pi-jev-approver: allowed this once, but could not save an "always allow" rule: ${result.reason}`,
+        "warning",
+      );
+    } else {
+      ctx.ui?.notify?.(`pi-jev-approver: saved an "always allow" rule for this exact command.`);
+    }
+  }
+
   await writeAuditRow({
     timestamp: new Date().toISOString(),
     command: logged,
@@ -263,6 +294,7 @@ export async function evaluateToolCall(
     route: approved ? "human_allow" : "human_deny",
     humanApproved: approved,
     humanReason,
+    savedAlwaysAllowRule: alwaysAllow ? savedAlwaysAllowRule : undefined,
   });
 
   return approved

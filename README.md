@@ -1,84 +1,55 @@
 # pi-jev-approver
 
-A shell command safety gate for the [Pi](https://pi.dev) coding agent, backed
-by [TypeSafe](https://typesafe.ai)'s Jev judgment model instead of the chat
-session model.
+A shell command approval extension for [Pi](https://pi.dev).
+[TypeSafe](https://typesafe.ai)'s Jev model checks each command and decides
+whether to allow it, deny it, or ask you.
 
-## Why not just use `pi-auto-approval`?
+[`pi-auto-approval`](https://pi.dev/packages/pi-auto-approval) uses the active
+chat model for approval checks. This extension uses Jev, a smaller model built
+for structured judgments. In our local [jev-test](../jev-test) comparisons,
+Jev took about 500 ms per check, compared with 2.5–3.5 seconds for a chat model.
 
-[`pi-auto-approval`](https://pi.dev/packages/pi-auto-approval) already does
-AI-classifier-based approval for Pi, and is a good default. Its classifier is
-the active chat session model (whatever you're talking to), which means every
-approval check is a full LLM call: slow, and priced like a chat completion.
+## Setup
 
-This extension swaps that layer for Jev, a small model purpose-trained for
-structured judgments rather than text generation. In our own side-by-side
-testing (see the [jev-test](../jev-test) project this was built alongside),
-Jev classification ran in ~500ms vs ~2.5-3.5s for a comparable chat-model
-call on the same task, at a fraction of the token cost, while returning
-calibrated per-question confidence for free - which is what this extension
-uses to decide when to trust an automatic decision versus asking a human.
-
-## How it works
-
-Every `bash` tool call becomes one Jev request (`src/jev-client.ts`): a `state`
-object of facts, and a set of typed `questions` asked over that state.
-
-### State sent to Jev (facts, not questions)
-
-Everything here is computed by plain code - a git command, a filesystem
-check, a regex, a lookup in the audit log - never itself a judgment call.
-Jev never has to *derive* any of it, only weigh it.
-
-| Field | Source | Always sent? |
-| --- | --- | --- |
-| `shell_command` | the raw command string | always |
-| `command_executable`, `command_subcommand`, `command_args` | `command-parts.ts`'s best-effort tokenizer | always |
-| `command_file_path_like_args` | args that look like paths (contain `/`, or start with `~`/`.`) | always |
-| `git_branch`, `git_branch_is_protected` | current branch; matched against `main`/`master`/`prod(uction)?`/`release/*`/`deploy/*` | if `cwd` is a git repo |
-| `git_has_uncommitted_changes` | `git status --porcelain` non-empty | if determinable |
-| `project_ecosystem` | marker file in `cwd`: `package.json`→node, `pyproject.toml`/`setup.py`→python, `Cargo.toml`→rust, `go.mod`→go, `Gemfile`→ruby, `pom.xml`/`build.gradle`→java | if a marker file is found |
-| `looks_like_public_registry_publish` | regex match against `npm/yarn/pnpm publish`, `twine upload`, `cargo publish`, `gem push`, `mvn deploy` | always |
-| `command_paths_outside_project_directory` | which file-path-like args resolve outside `cwd` (`path-scope.ts`) | if there are any path-like args |
-| `command_targets_home_directory`, `command_targets_filesystem_root` | whether any path resolves to `$HOME` or `/` | if there are any path-like args |
-| `prior_human_decisions_for_this_exact_command` | exact-string match against the audit log: times reviewed/allowed/denied, last stated reason | only if `PI_JEV_APPROVER_FEED_HISTORY=1` **and** this exact command has been seen before |
-
-### Questions asked over that state
-
-| Question | Type | Purpose |
-| --- | --- | --- |
-| `risk_level` | Score (0-2, see `RISK_LEVELS`) | the headline number the auto-allow/auto-deny/ask thresholds gate on |
-| `destructive` | Noul | deletes/overwrites/irreversibly discards local data |
-| `hard_to_reverse` | Noul | hard/impossible to undo even if not "destructive" (e.g. force-push) |
-| `affects_shared_or_remote_state` | Noul | visible to other people/systems, not just this machine |
-| `downloads_and_executes_code` | Noul | fetches and runs code from the network |
-| `modifies_permissions_or_ownership` | Noul | changes file/system access control |
-| *(your `customConcerns`, if configured)* | Noul, one per entry | domain-specific flags you added - see below |
-| `primary_concern` | Choice, over all of the above + `protected_branch_target`, `large_or_multi_step_command`, `operates_outside_project_directory`, `general_caution_no_single_driver` | the typed "why" shown on the human prompt |
-
-`risk_level`'s own instructions explicitly tell Jev to weigh branch
-protection, ecosystem/install-time code execution, public-registry
-publishes, prior human decisions, and out-of-project paths - so the state
-above isn't just passively available, it's specifically called out.
-
-```
-confident + risk <= 0.5   -> auto-allow
-confident + risk >= 1.5   -> auto-deny
-dicey (or Jev itself is unsure) -> optionally escalate to a stronger LLM, else ask a human
+```sh
+pi install npm:pi-jev-approver   # once published
 ```
 
-Every decision is appended to a local, redacted JSONL audit log, and the
-history line (times seen, allowed/denied, last reason) is always shown to a
-human when asked, whether or not `PI_JEV_APPROVER_FEED_HISTORY` is set -
-only feeding it back into Jev's automated score is gated, to avoid a
-rubber-stamp loop where one approval quietly lowers scrutiny for every
-future identical command with no second check.
+Set `TYPESAFE_API_KEY` in your environment using a key from
+[typesafe.ai](https://typesafe.ai), then reload Pi. Run `/jev-approver` to
+check status. Without the key, bash calls are denied.
+
+Configuration lives in `~/.pi/pi-jev-approver/config.json`.
+See [config.example.json](config.example.json) for an example, or run
+`/jev-approver config` to inspect your settings.
+
+## How approval works
+
+Command rules run first. If no rule matches, each `bash` tool call is sent to
+Jev with context about the command and working directory. Jev returns a risk
+score from 0 to 2, confidence, and flags describing its concerns.
+
+By default, a confident score of 0.5 or less allows the command; a confident
+score of 1.5 or more denies it. Other results go to you for review, unless
+you enable LLM escalation below.
+
+The prompt offers **Allow**, **Always allow**, and **Deny**. **Always allow**
+saves a rule in `config.json` for that exact command. If the config is invalid
+or already has 50 rules, you'll get a warning that the rule wasn't saved.
+Permanent deny rules must be added to the config by hand.
+
+Every decision goes into a local, redacted JSONL audit log. When you're asked
+to review a command, the prompt shows your previous decisions for that command
+and your last reason. Jev only receives this history if you set
+`PI_JEV_APPROVER_FEED_HISTORY=1`.
+
+If Pi has no interactive UI, commands that need human approval are denied.
 
 ## Custom concerns
 
-Add your own domain-specific flags without forking - each becomes a real,
-independently-detectable Noul question, not just a label. Put them in
-`~/.pi/pi-jev-approver/config.json` (see `config.example.json`):
+Jev checks for data loss, changes that are hard to undo, effects on shared
+systems, downloaded code execution, and permission changes. Add your own
+concerns in `config.json`:
 
 ```json
 {
@@ -88,67 +59,51 @@ independently-detectable Noul question, not just a label. Put them in
 }
 ```
 
-Custom concerns automatically flow into the `primary_concern` "why" choice
-and the returned flags, same as the five built-in ones. Keys must be
-lowercase snake_case; capped at 10 (each one adds a question to every
-classification call, so more isn't free) and 300 characters of description.
-Check what's currently configured with `/jev-approver config`.
+Each entry adds a question to every Jev request and can appear as the main
+reason for a decision (`primary_concern`). Use lowercase snake_case keys.
+The limit is 10 concerns, with up to 300 characters per description.
 
-## Hard-blocked and pre-approved commands (regex rules)
+## Command rules
 
-Some commands shouldn't need a judgment call at all - either they're always
-fine, or they're genuinely **verboten**, full stop. `commandRules` in
-`config.json` short-circuits the entire pipeline (Jev, escalation, human
-prompt - none of it runs) for a matching command:
+Use `commandRules` to allow or deny matching commands without calling Jev,
+escalating to another model, or showing an approval prompt.
 
 ```json
 {
   "commandRules": [
     {
-      "pattern": "^aws\\s+\\S+\\s+(describe|list|get|head|lookup|ls)[a-z0-9-]*\\b",
+      "pattern": "^git status$",
       "action": "allow",
       "weight": 20,
-      "reason": "AWS CLI read-only operation"
+      "reason": "Show working tree status"
     },
     {
       "pattern": "drop\\s+(table|database)",
       "action": "deny",
       "weight": 100,
-      "reason": "never run raw SQL drops"
+      "reason": "Never run raw SQL drops"
     }
   ]
 }
 ```
 
-- **`pattern`** - a regex tested against the raw command, case-insensitive
-  by default (pass `"flags": ""` on a rule for case-sensitive).
-- **`action`** - `"allow"` skips Jev entirely (cheaper and faster, not just
-  more lenient); `"deny"` is a genuine hard block - shown as `HARD BLOCK` in
-  the denial reason and in `/jev-approver recent` - that no escalated LLM
-  or human prompt can overturn, because the entire point is a guarantee
-  stronger than any probabilistic judgment.
-- **`weight`** - when multiple rules match, highest weight wins; on an
-  exact tie, `deny` wins over `allow` (a config mistake must fail toward
-  caution). Capped at 50 rules.
+- `pattern` is a regex matched against the raw command string. Matching is
+  case-insensitive by default; set `"flags": ""` for case-sensitive matching.
+- `action` is `"allow"` or `"deny"`. Deny rules appear as `HARD BLOCK` in the
+  denial message and `/jev-approver recent`. They cannot be overridden by an
+  LLM or approval prompt; you must edit the config.
+- `weight` determines which rule wins when several match. Higher weights win;
+  ties favor deny. The limit is 50 rules.
 
-Notice there's no rule denying AWS *writes* above - allow AWS reads (`aws
-s3 ls`, `aws ec2 describe-instances`, `aws sts get-caller-identity`, ...)
-and simply don't write a matching rule for writes at all; anything that
-doesn't match `action: allow` falls straight through to the normal Jev
-pipeline unchanged, which already treats `aws_command` (if you've added
-that custom concern) as risky. Live-tested: `aws s3 rm` scored 1.72/2,
-`aws ec2 terminate-instances` scored 1.80/2, both correctly landing in the
-ask-a-human band, while the three read commands never called Jev at all.
-There's no need to enumerate every dangerous AWS write verb by hand - that
-would be both intractable (the CLI surface is enormous) and unnecessary,
-since the existing probabilistic pipeline already handles "everything
-else" reasonably.
+Commands that don't match a rule go through the normal approval process.
+Rules match text, not shell semantics, so keep allow patterns narrow. A
+pattern that only checks the start of a command can also match a command
+with additional shell operations appended to it.
 
-## Optional: escalate to a stronger LLM before asking a human
+## Getting a second opinion
 
-For dicey commands, you can have the extension ask a real chat model for a
-second opinion before bothering you - off by default. Enable it in
-`config.json`:
+To have a chat model review uncertain results before asking you, enable
+escalation in `config.json`:
 
 ```json
 {
@@ -161,86 +116,90 @@ second opinion before bothering you - off by default. Enable it in
 }
 ```
 
-`model` is a `provider/id` reference resolved through **Pi's own model
-registry** (e.g. `"anthropic/claude-sonnet-5"`), or `""` to use whatever
-model your Pi session is already talking to. Auth is whatever you already
-have configured in Pi for that model - there's no separate API key to set
-up here, unlike Jev (which needs its own `TYPESAFE_API_KEY` since it's a
-different service entirely).
+Set `model` to a `provider/id` from Pi's model registry, or leave it empty to
+use the current session model. Escalation uses the credentials already
+configured in Pi. Jev still requires its separate `TYPESAFE_API_KEY`.
 
-Escalation only fires when Jev's own risk score *and* confidence are both at
-or below your thresholds. Unlike Jev, a real chat LLM can produce a written
-rationale, which gets stored in the audit log (`llmEscalation.rationale`)
-and shown in `/jev-approver recent`. If the LLM call fails, times out, or
-doesn't return a clear allow/deny, this **always** falls through to asking
-you - escalation can only reduce how often you're asked, it can never
-replace you as the last resort. The system prompt also explicitly tells the
-model that when it's unsure, denying (not allowing) is the safe default.
+This is off by default and only runs when both Jev's risk score and confidence
+are at or below the configured limits. You can read the second opinion in
+`/jev-approver recent` or the audit log's `llmEscalation.rationale` field.
+If the call fails, times out, or gives no clear decision, you're asked to decide.
 
-## Setup
+Escalation requires `@oh-my-pi/pi-ai` or `@earendil-works/pi-ai` to be
+resolvable, and `ctx.modelRegistry` to be available on the host. If either is
+missing, the extension falls back to human review.
 
+## Audit logs and privacy
+
+Commands and the [context below](#context-sent-to-jev) are sent to TypeSafe
+for classification.
+If escalation is enabled, it also sends approval requests to the configured
+chat model provider.
+
+Before commands are written to the local audit log,
+[src/redact.ts](src/redact.ts) removes common secret patterns, including
+bearer tokens, password and token flags, long opaque strings, emails, IP
+addresses, and home-directory usernames. Redaction is best-effort: it can
+miss secrets in free-form shell commands.
+
+There is no telemetry. Run `/jev-approver export` to create a timestamped,
+redacted snapshot of the audit log. Review it before sharing. To check the
+current redaction coverage, run:
+
+```sh
+npx tsx scripts/test-redact.ts
 ```
-pi install npm:pi-jev-approver   # once published
-```
 
-Set `TYPESAFE_API_KEY` in your environment (get one from
-[typesafe.ai](https://typesafe.ai)). Without it, all bash calls fail closed.
+## Training a local classifier
 
-Reload Pi and check status with `/jev-approver`.
+Human approval decisions are logged alongside Jev's scores, confidence, and
+flags. The training script uses those records to fit a logistic regression:
 
-## Privacy: redaction, not collection
-
-Before a command is ever written to disk, `src/redact.ts` strips common
-secret patterns (bearer tokens, `--password`/`--token` flags, long opaque
-strings, emails, IPs, home-directory usernames). This is **best-effort, not
-a guarantee** - free-form shell commands can leak secrets in ways no regex
-set fully covers. Run `npx tsx scripts/test-redact.ts` to see the current
-coverage.
-
-There is no telemetry and nothing leaves your machine automatically. Run
-`/jev-approver export` to copy a timestamped, redacted snapshot of your audit
-log if you want to share or inspect it - review it yourself first.
-
-## Training a lightweight classifier on top
-
-Jev itself has no fine-tuning API - the only lever is how you write the
-question, which is already tuned here. What *is* trainable is a small
-classical model on top: every time a human is asked to approve a dicey
-command, their answer is logged alongside Jev's risk score, confidence, and
-flags. That's labeled data.
-
-```
+```sh
 uv run --with scikit-learn,numpy scripts/train.py
 ```
 
-Fits a logistic regression from Jev's outputs (+ git branch protection +
-public-registry-publish detection, 9 features total) to the human's actual
-decision. With enough real rows in your audit log, the learned weights tell
-you which flags your team actually cares about - e.g. if
-`downloads_and_executes_code` gets a near-zero weight, your team doesn't
-treat that as a real signal in practice, whatever Jev's raw flag says. Below
-~10x the feature count in real labeled rows (90 rows for the current 9
-features) it falls back to a synthetic demo instead - fewer than that and
-the fit is underdetermined enough to flip a coefficient's sign, which is
-exactly what happened during development when this ran on 60 synthetic
-rows with only 7 features.
+The script uses nine features, including Jev's scores, branch protection, and
+registry-publish detection, to look for patterns in what you allow and deny.
+It needs at least 90 labeled records; below that, it runs a synthetic demo.
+It trains a separate classifier without changing Jev's weights.
 
-This recalibrates the auto-allow/auto-deny thresholds to your team's actual
-risk tolerance without touching Jev's weights at all.
+## Jev request reference
 
-## Known limitations
+### Context sent to Jev
 
-- No fine-tuning of Jev itself is possible; only the question text and the
-  classical layer on top are tunable.
-- Redaction is regex-based and best-effort - do not treat exported logs as
-  safe to publish without a human reading them first.
-- The `ask a human` path fails closed (denies) if Pi has no interactive UI
-  available (e.g. non-interactive/CI runs) - there's no fallback approval
-  channel implemented here.
-- LLM escalation depends on `@oh-my-pi/pi-ai` or `@earendil-works/pi-ai`
-  being resolvable (they ship with Pi itself) and on `ctx.modelRegistry`
-  being present on the host - if either is missing, escalation reports
-  "unsure" and falls through to asking you, it doesn't error out.
-- A `deny` command rule is a genuine hard block with no override path in
-  this extension - if you write an overly broad pattern, the only fix is
-  editing `config.json`, there's no runtime "allow just this once."
+These fields come from command parsing, filesystem checks, Git, and the
+audit log. Parsing and path detection are best-effort.
+
+| Field | Contents | When sent |
+| --- | --- | --- |
+| `shell_command` | Raw command string | Always |
+| `command_executable`, `command_subcommand`, `command_args` | Parsed command parts | Always |
+| `command_file_path_like_args` | Arguments containing `/` or starting with `~` or `.` | Always |
+| `git_branch`, `git_branch_is_protected` | Current branch; protected names match `main`, `master`, `prod(uction)?`, `release/*`, or `deploy/*` | In a Git repo |
+| `git_has_uncommitted_changes` | Whether `git status --porcelain` is non-empty | When determinable |
+| `project_ecosystem` | Node, Python, Rust, Go, Ruby, or Java, based on marker files in `cwd` | When a marker is found |
+| `looks_like_public_registry_publish` | Matches for `npm/yarn/pnpm publish`, `twine upload`, `cargo publish`, `gem push`, or `mvn deploy` | Always |
+| `command_paths_outside_project_directory` | Path-like arguments that resolve outside `cwd` | When path-like arguments exist |
+| `command_targets_home_directory`, `command_targets_filesystem_root` | Whether any path resolves to `$HOME` or `/` | When path-like arguments exist |
+| `prior_human_decisions_for_this_exact_command` | Review, allow, and deny counts, plus the last reason | When history is enabled and the command has been reviewed before |
+
+### What Jev evaluates
+
+| Question | Type | Meaning |
+| --- | --- | --- |
+| `risk_level` | Score, 0–2 | Overall risk used for the decision thresholds |
+| `destructive` | Noul | Deletes, overwrites, or irreversibly discards local data |
+| `hard_to_reverse` | Noul | Difficult to undo, such as a force-push |
+| `affects_shared_or_remote_state` | Noul | Affects other people or systems |
+| `downloads_and_executes_code` | Noul | Fetches and runs code from the network |
+| `modifies_permissions_or_ownership` | Noul | Changes file or system access controls |
+| Your `customConcerns` | Noul, one per entry | Additional concerns defined in config |
+| `primary_concern` | Choice | Main reason shown in the approval prompt |
+
+`primary_concern` can select any built-in or custom concern, as well as
+`protected_branch_target`, `large_or_multi_step_command`,
+`operates_outside_project_directory`, or `general_caution_no_single_driver`.
+The risk instructions also ask Jev to consider branch protection,
+install-time code execution, registry publishing, command history, and paths
+outside the project.

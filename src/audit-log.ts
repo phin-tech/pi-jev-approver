@@ -39,6 +39,10 @@ export interface AuditRow {
     | "failed_closed";
   humanApproved?: boolean;
   humanReason?: string;
+  // Set when the human picked "Always allow" - whether a standing command
+  // rule for this exact command was actually persisted to config.json
+  // (false if the rule cap was already hit or the config file was invalid).
+  savedAlwaysAllowRule?: boolean;
   llmEscalation?: EscalationVerdict;
   matchedRule?: { pattern: string; weight: number; reason?: string };
 }
